@@ -1,4 +1,9 @@
+import bencodepy
+import socket
+import struct
 import urllib.request
+from dataclasses import dataclass
+from typing import List
 from urllib.parse import urlencode
 
 from torrentfile import TorrentFile
@@ -7,9 +12,17 @@ from utils import gen_peer_id
 PORT = 6881
 
 
+@dataclass
+class Peer:
+    ip: str
+    port: int
+
+
 def get_peers(torrent_file: TorrentFile):
     data = _request_data_from_tracker(torrent_file)
-    return data
+    if data:
+        decoded = bencodepy.decode(data)        
+        return _extract_peers(decoded[b'peers'])
 
 
 def _request_data_from_tracker(torrent_file: TorrentFile) -> bytes:
@@ -26,9 +39,18 @@ def _request_data_from_tracker(torrent_file: TorrentFile) -> bytes:
     fp = urllib.request.urlopen(url)
     return fp.read()
 
-if __name__ == '__main__':
-    from torrentfile import parse_torrent_file
-    import os
-    path = os.getcwd() + '/tests/data/debian-10.9.0-amd64-netinst.iso.torrent'
-    torrent_file = parse_torrent_file(path)
-    get_peers(torrent_file)
+
+def _extract_peers(data: bytes) -> List[Peer]:
+    peers = []
+    index = 0
+    while index < len(data):
+        ip = data[index:index+4]
+        port = data[index+4:index+6]
+        peers.append(
+            Peer(
+                ip=socket.inet_ntoa(ip),
+                port=struct.unpack('>H', port)[0],
+            ),
+        )
+        index += 6
+    return peers
