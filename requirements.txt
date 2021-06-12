@@ -1,0 +1,2 @@
+bencodepy==0.9.5
+pytest==6.2.4
