@@ -1,4 +1,3 @@
-import pytest
 from torrentfile import parse_torrent_file
 
 

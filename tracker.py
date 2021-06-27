@@ -3,7 +3,7 @@ import socket
 import struct
 import urllib.request
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 from urllib.parse import urlencode
 
 from torrentfile import TorrentFile
@@ -18,7 +18,7 @@ class Peer:
     port: int
 
 
-def get_peers(torrent_file: TorrentFile):
+def get_peers(torrent_file: TorrentFile) -> Optional[Peer]:
     data = _request_data_from_tracker(torrent_file)
     if data:
         decoded = bencodepy.decode(data)        
