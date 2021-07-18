@@ -18,11 +18,16 @@ class Peer:
     port: int
 
 
+class TrackerError(Exception):
+    """Ошибка при выгрузке данных из трекера."""
+
+
 def get_peers(torrent_file: TorrentFile) -> Optional[Peer]:
     data = _request_data_from_tracker(torrent_file)
     if data:
-        decoded = bencodepy.decode(data)        
+        decoded = bencodepy.decode(data)
         return _extract_peers(decoded[b'peers'])
+    raise TrackerError
 
 
 def _request_data_from_tracker(torrent_file: TorrentFile) -> bytes:

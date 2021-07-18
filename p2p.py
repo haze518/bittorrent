@@ -1,8 +1,9 @@
 import collections
+import logging
 import math
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Deque
+from typing import Deque, Optional
 
 from client import (
     Client,
@@ -12,7 +13,7 @@ from client import (
     send_request,
     send_unchoke,
 )
-from messages import handle_message, read_message
+from messages import Message, handle_message, read_message
 from torrentfile import TorrentFile
 from tracker import Peer, get_peers
 from utils import gen_peer_id
@@ -38,9 +39,11 @@ class Piece:
     def __init__(self, index: int, piece_hash: bytes, piece_length: int):
         self._index = index
         self._piece_hash = piece_hash  # нужен для дальнейшей проверки sha1 скачанного куска
+        self._piece_length = piece_length
         self._blocks = self._get_blocks(index, piece_length)
         self._block_data = collections.OrderedDict()
         self._status = PieceStatus.READY
+        self._size = 0
 
     def enque(self, block: Block) -> None:
         self._blocks.appendleft(block)
@@ -49,16 +52,21 @@ class Piece:
         return self._blocks.pop()
 
     def add_block_data(self, block: Block) -> None:
+        logging.info(f'block: {block.begin} of piece: {block.index} has successfully downloaded')
         self._block_data[block.begin] = block.data
+        self._size += len(block.data)
 
-    def get_piece_result(self):
-        return sum([piece_data for piece_data in self._block_data.values()])
+    def get_piece_result(self) -> bytearray:
+        result = bytearray()
+        for data in self._block_data.values():
+            result.append(data)
+        return result
 
     @property
     def status(self) -> PieceStatus:
         return self._status
-    
-    @property.setter
+
+    @status.setter
     def status(self, status: PieceStatus) -> PieceStatus:
         self._status = status
 
@@ -73,7 +81,10 @@ class Piece:
             blocks[-1] = Block(length=piece_length%BLOCK_SIZE, begin=BLOCK_SIZE*number_of_blocks, index=index)
         return collections.deque(blocks)
 
-    def __len__(self):
+    def has_piece_downloaded(self):
+        return self._size == self._piece_length
+
+    def n_blocks(self):
         return len(self._blocks)
 
 
@@ -83,13 +94,13 @@ class PieceManager:
         self._piece_data = collections.OrderedDict()
 
     def enque(self, piece: Piece) -> None:
-        self.pieces.appendleft(piece)
+        self._pieces.appendleft(piece)
 
     def deque(self) -> Piece:
-        return self.pieces.pop()
+        return self._pieces.pop()
 
     def add_piece_data(self, piece: Piece):
-        self._piece_data[piece._index]
+        self._piece_data[piece._index] = piece.get_piece_result()
 
     def _get_pieces(self, torrentfile: TorrentFile) -> Deque[Piece]:
         pieces = collections.deque()
@@ -102,11 +113,12 @@ class PieceManager:
             )
         return pieces
 
-    def __len__(self):
+    def n_pieces(self):
         return len(self._pieces)
 
 
 def download(torrentfile: TorrentFile):
+    logging.info(f'start download file: {torrentfile.name}')
     piece_manager = PieceManager(torrentfile)
     peers = get_peers(torrentfile)
     for peer in peers:
@@ -115,9 +127,11 @@ def download(torrentfile: TorrentFile):
 
 def start_worker(peer: Peer, piece_manager: PieceManager, torrentfile: TorrentFile):
     client = load_client(peer, torrentfile.info_hash, gen_peer_id())
+    if not client:
+        return None
     send_interested(client.conn)
     send_unchoke(client.conn)
-    for _ in range(len(piece_manager)):
+    for _ in range(piece_manager.n_pieces()):
         piece = piece_manager.deque()
         if not check_bitfield_index(client.bitfield, piece.index):
             piece_manager.enque(piece)
@@ -129,22 +143,38 @@ def start_worker(peer: Peer, piece_manager: PieceManager, torrentfile: TorrentFi
         piece_manager.add_piece_data(piece)
 
 
-def download_piece(client: Client, piece: Piece):
+def download_piece(client: Client, piece: Piece) -> None:
+    logging.info(f'start download piece: {piece.index} from client: {client.conn.getsockname()[0]}')
+    n_attempts = 5
     while True:
-        for _ in range(len(piece)):
+        for _ in range(piece.n_blocks()):
             if client.chocked:
                 piece.status = PieceStatus.READY
                 return None
             else:
                 piece.status = PieceStatus.PENDING
             block = piece.deque()
-            send_request(client.conn, block.index, block.begin, block.length)
+            try:
+                send_request(client.conn, block.index, block.begin, block.length)
+            except OSError:
+                return None
             message = read_message(client.conn)
+            if not message:
+                logging.info(f'There are no data for block: {block.begin}')
+                return None
+            elif message == 'keep_alive':
+                logging.info(f'Keep alive message for block: {block.begin}')
+                piece.enque(block)
+                continue
             handle_message(message, client, block)
             if block.data:
-               piece.add_block_data(block)
+                logging.info('add block data')
+                piece.add_block_data(block)
             else:
                 piece.enque(block)
-        if not len(piece):
+        if piece.has_piece_downloaded():
             piece.status = PieceStatus.FINISHED
+            logging.info(f'piece: {piece.index} has successfully downloaded')
+            return None
+        if n_attempts <= 0:
             return None
